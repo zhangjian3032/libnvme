@@ -184,24 +184,24 @@ int do_identify(nvme_mi_ep_t ep, int argc, char **argv)
 	uint16_t ctrl_id;
 	char buf[41];
 	bool partial;
-	int rc, tmp;
+	int rc;
 
 	if (argc < 2) {
 		fprintf(stderr, "no controller ID specified\n");
 		return -1;
 	}
 
-	tmp = atoi(argv[1]);
-	if (tmp < 0 || tmp > 0xffff) {
+	ctrl_id = atoi(argv[1]);
+	if (ctrl_id < 0 || ctrl_id > 0xffff) {
 		fprintf(stderr, "invalid controller ID\n");
 		return -1;
 	}
 
-	ctrl_id = tmp & 0xffff;
+	ctrl_id = ctrl_id & 0xffff;
 
 	partial = argc > 2 && !strcmp(argv[2], "--partial");
 
-	ctrl = nvme_mi_init_ctrl(ep, tmp);
+	ctrl = nvme_mi_init_ctrl(ep, ctrl_id);
 	if (!ctrl) {
 		warn("can't create controller");
 		return -1;
@@ -211,7 +211,7 @@ int do_identify(nvme_mi_ep_t ep, int argc, char **argv)
 	id_args.args_size = sizeof(id_args);
 	id_args.cns = NVME_IDENTIFY_CNS_CTRL;
 	id_args.nsid = NVME_NSID_NONE;
-	id_args.cntid = ctrl_id;
+	id_args.cntid = 0;
 	id_args.csi = NVME_CSI_NVM;
 
 	/* for this example code, we can either do a full or partial identify;
