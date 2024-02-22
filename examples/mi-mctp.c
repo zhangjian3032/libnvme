@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
+#include <locale.h>
 
 #include <libnvme-mi.h>
 
@@ -52,6 +53,146 @@ static struct {
 	{ 0x01, "PCIe", show_port_pcie },
 	{ 0x02, "SMBus", show_port_smbus },
 };
+union nvme_uint128 {
+	__u8  bytes[16];
+	__u32 words[4]; /* [0] is most significant word */
+};
+
+typedef union nvme_uint128 nvme_uint128_t;
+
+nvme_uint128_t le128_to_cpu(__u8 *data)
+{
+	nvme_uint128_t u;
+	nvme_uint128_t tmp;
+
+	memcpy(tmp.bytes, data, 16);
+	u.words[0] = le32_to_cpu(tmp.words[3]);
+	u.words[1] = le32_to_cpu(tmp.words[2]);
+	u.words[2] = le32_to_cpu(tmp.words[1]);
+	u.words[3] = le32_to_cpu(tmp.words[0]);
+	return u;
+}
+#define ABSOLUTE_ZERO_CELSIUS -273
+
+static inline long kelvin_to_celsius(long t)
+{
+	return t + ABSOLUTE_ZERO_CELSIUS;
+}
+static char *__uint128_t_to_string(nvme_uint128_t val, bool l10n)
+{
+	static char str[60];
+	int idx = 60;
+	__u64 div, rem;
+	char *sep = NULL;
+	int i, len = 0, cl = 0;
+
+	if (l10n) {
+		sep = localeconv()->thousands_sep;
+		len = strlen(sep);
+		cl = 1;
+	}
+
+	/* terminate at the end, and build up from the ones */
+	str[--idx] = '\0';
+
+	do {
+		if (len && !((sizeof(str) - idx) % (3 + cl))) {
+			for (i = 0; i < len; i++)
+				str[--idx] = sep[len - i - 1];
+		}
+
+		rem = val.words[0];
+
+		div = rem / 10;
+		rem = ((rem - div * 10) << 32) + val.words[1];
+		val.words[0] = div;
+
+		div = rem / 10;
+		rem = ((rem - div * 10) << 32) + val.words[2];
+		val.words[1] = div;
+
+		div = rem / 10;
+		rem = ((rem - div * 10) << 32) + val.words[3];
+		val.words[2] = div;
+
+		div = rem / 10;
+		rem = rem - div * 10;
+		val.words[3] = div;
+
+		str[--idx] = '0' + rem;
+	} while (val.words[0] || val.words[1] || val.words[2] || val.words[3]);
+
+	return str + idx;
+}
+
+char *uint128_t_to_string(nvme_uint128_t val)
+{
+	return __uint128_t_to_string(val, false);
+}
+
+char *uint128_t_to_l10n_string(nvme_uint128_t val)
+{
+	return __uint128_t_to_string(val, true);
+}
+
+static long double uint128_t_to_double(nvme_uint128_t data)
+{
+	long double result = 0;
+	int i;
+
+	for (i = 0; i < sizeof(data.words) / sizeof(*data.words); i++) {
+		result *= 4294967296;
+		result += data.words[i];
+	}
+
+	return result;
+}
+static struct si_suffix {
+	long double magnitude;
+	unsigned int exponent;
+	const char *suffix;
+} si_suffixes[] = {
+	{1e30, 30, "Q"},
+	{1e27, 27, "R"},
+	{1e24, 24, "Y"},
+	{1e21, 21, "Z"},
+	{1e18, 18, "E"},
+	{1e15, 15, "P"},
+	{1e12, 12, "T"},
+	{1e9, 9, "G"},
+	{1e6, 6, "M"},
+	{1e3, 3, "k"},
+};
+const char *suffix_si_get_ld(long double *value)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(si_suffixes); i++) {
+		struct si_suffix *s = &si_suffixes[i];
+
+		if (*value >= s->magnitude) {
+			*value /= s->magnitude;
+			return s->suffix;
+		}
+	}
+
+	return "";
+}
+char *uint128_t_to_si_string(nvme_uint128_t val, __u32 bytes_per_unit)
+{
+	long double bytes = uint128_t_to_double(val) * bytes_per_unit;
+	static char str[40];
+	const char *suffix = suffix_si_get_ld(&bytes);
+	int n = snprintf(str, sizeof(str), "%.2Lf %sB", bytes, suffix);
+
+	if (n <= 0)
+		return "";
+
+	if (n >= sizeof(str))
+		str[sizeof(str) - 1] = '\0';
+
+	return str;
+}
 
 static int show_port(nvme_mi_ep_t ep, int portid)
 {
@@ -114,6 +255,98 @@ int do_info(nvme_mi_ep_t ep)
 	printf(" composite temp:    %d\n", ss_health.ctemp);
 	printf(" drive life used:   %d%%\n", ss_health.pdlu);
 	printf(" controller status: 0x%04x\n", le16_to_cpu(ss_health.ccs));
+
+	return 0;
+}
+int do_controller_health(nvme_mi_ep_t ep)
+{
+	struct nvme_mi_ctrl_health_status ctrl_health;
+	int rc;
+
+	rc = nvme_mi_mi_ctrl_health_status_poll(ep, &ctrl_health);
+	if (rc)
+		err(EXIT_FAILURE, "can't perform Health Status Poll operation");
+	printf("Controller health:\n");
+	printf(" controller status: 0x%04x\n", le16_to_cpu(ctrl_health.csts));
+	printf(" composite temp:    %dK (%d°C)\n", ctrl_health.ctemp, ctrl_health.ctemp - 273);
+	printf(" drive life used:   %d%%\n", ctrl_health.pdlu);
+	printf(" controller available spare: %d%%\n", ctrl_health.spare);
+	printf(" controller critical warnings: 0x%x\n", ctrl_health.cwarn);
+
+	return 0;
+}
+
+int do_smart_log(nvme_mi_ep_t ep)
+{
+	struct nvme_smart_log smart_log = { 0 };
+	nvme_mi_ctrl_t ctrl;
+	__u16 temperature;
+	int i, rc;
+
+	ctrl = nvme_mi_init_ctrl(ep, 0);
+	rc = nvme_mi_admin_get_log_smart(ctrl, 0, 0, &smart_log);
+	if (rc) {
+		warn("can't perform Get smart log operation");
+		return -1;
+	}
+
+	temperature = smart_log.temperature[1] << 8 | smart_log.temperature[0];
+
+	printf("SMART log:\n");
+	printf("temperature				: %d °C (%u K)\n",
+		temperature - 273, temperature);
+	printf("available_spare				: %u%%\n",
+		smart_log.avail_spare);
+	printf("available_spare_threshold		: %u%%\n",
+		smart_log.spare_thresh);
+	printf("percentage_used				: %u%%\n",
+		smart_log.percent_used);
+	printf("endurance group critical warning summary: %#x\n",
+		smart_log.endu_grp_crit_warn_sumry);
+	printf("Data Units Read				: %s (%s)\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.data_units_read)),
+		uint128_t_to_si_string(le128_to_cpu(smart_log.data_units_read),
+				       1000 * 512));
+	printf("Data Units Written			: %s (%s)\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.data_units_written)),
+		uint128_t_to_si_string(le128_to_cpu(smart_log.data_units_written),
+				       1000 * 512));
+	printf("host_read_commands			: %s\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.host_reads)));
+	printf("host_write_commands			: %s\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.host_writes)));
+	printf("controller_busy_time			: %s\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.ctrl_busy_time)));
+	printf("power_cycles				: %s\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.power_cycles)));
+	printf("power_on_hours				: %s\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.power_on_hours)));
+	printf("unsafe_shutdowns			: %s\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.unsafe_shutdowns)));
+	printf("media_errors				: %s\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.media_errors)));
+	printf("num_err_log_entries			: %s\n",
+		uint128_t_to_l10n_string(le128_to_cpu(smart_log.num_err_log_entries)));
+	printf("Warning Temperature Time		: %u\n",
+		le32_to_cpu(smart_log.warning_temp_time));
+	printf("Critical Composite Temperature Time	: %u\n",
+		le32_to_cpu(smart_log.critical_comp_time));
+	for (i = 0; i < 8; i++) {
+		__s32 temp = le16_to_cpu(smart_log.temp_sensor[i]);
+
+		if (temp == 0)
+			continue;
+		printf("Temperature Sensor %d           : %ld °C (%u K)\n",
+		       i + 1, kelvin_to_celsius(temp), temp);
+	}
+	printf("Thermal Management T1 Trans Count	: %u\n",
+		le32_to_cpu(smart_log.thm_temp1_trans_count));
+	printf("Thermal Management T2 Trans Count	: %u\n",
+		le32_to_cpu(smart_log.thm_temp2_trans_count));
+	printf("Thermal Management T1 Total Time	: %u\n",
+		le32_to_cpu(smart_log.thm_temp1_total_time));
+	printf("Thermal Management T2 Total Time	: %u\n",
+		le32_to_cpu(smart_log.thm_temp2_total_time));
 
 	return 0;
 }
@@ -624,8 +857,10 @@ int do_config_set(nvme_mi_ep_t ep, int argc, char **argv)
 enum action {
 	ACTION_INFO,
 	ACTION_CONTROLLERS,
+	ACTION_CONTROLLER_HEALTH,
 	ACTION_IDENTIFY,
 	ACTION_GET_LOG_PAGE,
+	ACTION_GET_SMART_LOG,
 	ACTION_ADMIN_RAW,
 	ACTION_SECURITY_INFO,
 	ACTION_CONFIG_GET,
@@ -643,11 +878,17 @@ static int do_action_endpoint(enum action action, nvme_mi_ep_t ep, int argc, cha
 	case ACTION_CONTROLLERS:
 		rc = do_controllers(ep);
 		break;
+	case ACTION_CONTROLLER_HEALTH:
+		rc = do_controller_health(ep);
+		break;
 	case ACTION_IDENTIFY:
 		rc = do_identify(ep, argc, argv);
 		break;
 	case ACTION_GET_LOG_PAGE:
 		rc = do_get_log_page(ep, argc, argv);
+		break;
+	case ACTION_GET_SMART_LOG:
+		rc = do_smart_log(ep);
 		break;
 	case ACTION_ADMIN_RAW:
 		rc = do_admin_raw(ep, argc, argv);
@@ -701,8 +942,10 @@ int main(int argc, char **argv)
 		fprintf(stderr, "where action is:\n"
 			"  info\n"
 			"  controllers\n"
+			"  controller-health\n"
 			"  identify <controller-id> [--partial]\n"
 			"  get-log-page <controller-id> [<log-id>]\n"
+			"  get-smart-log\n"
 			"  admin <controller-id> <opcode> [<cdw10>, <cdw11>, ...]\n"
 			"  security-info <controller-id>\n"
 			"  get-config [port]\n"
@@ -724,10 +967,14 @@ int main(int argc, char **argv)
 			action = ACTION_INFO;
 		} else if (!strcmp(action_str, "controllers")) {
 			action = ACTION_CONTROLLERS;
+		}  else if (!strcmp(action_str, "controller-health")) {
+			action = ACTION_CONTROLLER_HEALTH;
 		} else if (!strcmp(action_str, "identify")) {
 			action = ACTION_IDENTIFY;
 		} else if (!strcmp(action_str, "get-log-page")) {
 			action = ACTION_GET_LOG_PAGE;
+		} else if (!strcmp(action_str, "get-smart-log")) {
+			action = ACTION_GET_SMART_LOG;
 		} else if (!strcmp(action_str, "admin")) {
 			action = ACTION_ADMIN_RAW;
 		} else if (!strcmp(action_str, "security-info")) {
