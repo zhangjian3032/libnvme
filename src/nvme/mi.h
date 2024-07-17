@@ -370,6 +370,34 @@ struct nvme_mi_admin_resp_hdr {
 } __attribute__((packed));
 
 /**
+ * struct nvme_mi_service_req_hdr - servicing command request header.
+ * @hdr: Generic MI message header
+ * @opcode: servicing command opcode (using &enum nvme_service_opcode)
+ * @tag: flag - be used to sent and return
+ * @cpsp: Control Primitive Specific Parameter
+ */
+struct nvme_mi_service_req_hdr {
+	struct nvme_mi_msg_hdr hdr;
+	__u8	opcode;
+	__u8	tag;
+	__le16	cpsp;
+} __attribute((packed));
+
+/** struct nvme_mi_service_resp_hdr - servicing command response header.
+ * @hdr: Generic MI message header
+ * @status: Servicing command status (using &enum nvme_service_status)
+ * @tag: flag - Be used to sent and return
+ * @cpsr: Control Primitive Specific Response
+ */
+
+struct nvme_mi_service_resp_hdr {
+	struct nvme_mi_msg_hdr hdr;
+	__u8	status;
+	__u8	tag;
+	__le16	cpsr;
+} __attribute((packed));
+
+/**
  * nvme_mi_status_to_string() - return a string representation of the MI
  * status.
  * @status: MI response status
@@ -1078,6 +1106,53 @@ static inline int nvme_mi_admin_identify(nvme_mi_ctrl_t ctrl,
 {
 	return nvme_mi_admin_identify_partial(ctrl, args,
 					      0, NVME_IDENTIFY_DATA_SIZE);
+}
+
+/**
+ * nvme_mi_service_primitive_control() - Perform a Service Primitive command
+ * @ep: endpoint for MI communication
+ * @opcode: Service Primitive opcode (using &enum nvme_service_opcode)
+ * @result_cpsr: Optional field to return the result from the CPSR field
+ *
+ * Perform a Service Primitive command, using the opcode specified in @opcode
+ * Stores the result from the CPSR field in @result_cpsr, if set.
+ *
+ * Return: 0 on success, non-zero on failure
+ *
+ * See: &enum nvme_service_opcode
+ *
+ */
+int nvme_mi_service_primitive_control(nvme_mi_ep_t ep, __u8 opcode, __u16 *result_cpsr);
+
+/**
+ * nvme_mi_service_primitive_abort() - Perform a Service Primitive Abort command
+ * @ep: endpoint for MI communication
+ *
+ * Perform a Service Primitive Abort command, to abort the current MI command
+ *
+ * Return: 0 on success, non-zero on failure
+ *
+ */
+static inline int nvme_mi_service_primitive_abort(nvme_mi_ep_t ep)
+{
+	return nvme_mi_service_primitive_control(ep,
+			   nvme_service_primitive_abort, NULL);
+}
+
+/**
+ * nvme_mi_service_primitive_pause() - Perform a Service Primitive Pause command
+ * @ep: endpoint for MI communication
+ * @result_cpsr: Optional field to return the result from the CPSR field
+ *
+ * Perform a Service Primitive Pause command, to pause the current MI command
+ *
+ * Return: 0 on success, non-zero on failure
+ *
+ */
+static inline int nvme_mi_service_primitive_pause(nvme_mi_ep_t ep, __u16 *result_cpsr)
+{
+	return nvme_mi_service_primitive_control(ep,
+			   nvme_service_primitive_pause, result_cpsr);
 }
 
 /**

@@ -496,6 +496,29 @@ static void nvme_mi_admin_init_resp(struct nvme_mi_resp *resp,
 	resp->hdr_len = sizeof(*hdr);
 }
 
+static void nvme_mi_service_init_req(struct nvme_mi_req *req,
+				   struct nvme_mi_service_req_hdr *hdr, __u8 opcode)
+{
+	memset(req, 0, sizeof(*req));
+	memset(hdr, 0, sizeof(*hdr));
+
+	hdr->hdr.type = NVME_MI_MSGTYPE_NVME;
+	hdr->hdr.nmp = (NVME_MI_ROR_REQ << 7) |
+		(NVME_MI_MT_CONTROL << 3); /* we always use command slot 0 */
+	hdr->opcode = opcode;
+
+	req->hdr = &hdr->hdr;
+	req->hdr_len = sizeof(*hdr);
+}
+
+static void nvme_mi_service_init_resp(struct nvme_mi_resp *resp,
+				    struct nvme_mi_service_resp_hdr *hdr)
+{
+	memset(resp, 0, sizeof(*resp));
+	resp->hdr = &hdr->hdr;
+	resp->hdr_len = sizeof(*hdr);
+}
+
 static int nvme_mi_admin_parse_status(struct nvme_mi_resp *resp, __u32 *result)
 {
 	struct nvme_mi_admin_resp_hdr *admin_hdr;
@@ -545,6 +568,36 @@ static int nvme_mi_admin_parse_status(struct nvme_mi_resp *resp, __u32 *result)
 		*result = nvme_result;
 
 	return nvme_status;
+}
+
+static int nvme_mi_service_parse_status(struct nvme_mi_resp *resp, __le16 *cpsr)
+{
+	struct nvme_mi_service_resp_hdr *resp_hdr;
+
+	/* we have a few different sources of "result" here: the status header
+	 * in the MI response, the cdw3 status field, and (command specific)
+	 * return values in cdw0. The latter is returned in the result pointer,
+	 * the former two generate return values here
+	 */
+
+	if (resp->hdr_len < sizeof(*resp_hdr)) {
+		errno = -EPROTO;
+		return -1;
+	}
+	resp_hdr = (struct nvme_mi_service_resp_hdr *)resp->hdr;
+
+	/* If we have a MI error, we can't be sure there's an admin header
+	 * following; return just the MI status, with the status type
+	 * indicator of MI.
+	 */
+	if (resp_hdr->status)
+		return resp_hdr->status |
+			(NVME_STATUS_TYPE_MI << NVME_STATUS_TYPE_SHIFT);
+
+	if (cpsr)
+		*cpsr = resp_hdr->cpsr;
+
+	return resp_hdr->status;
 }
 
 int nvme_mi_admin_xfer(nvme_mi_ctrl_t ctrl,
@@ -769,6 +822,38 @@ int nvme_mi_admin_identify_partial(nvme_mi_ctrl_t ctrl,
 		errno = EPROTO;
 		return -1;
 	}
+
+	return 0;
+}
+
+int nvme_mi_service_primitive_control(nvme_mi_ep_t ep, __u8 opcode, __u16 *result_cpsr)
+{
+	struct nvme_mi_service_resp_hdr resp_hdr;
+	struct nvme_mi_service_req_hdr req_hdr;
+	struct nvme_mi_resp resp;
+	struct nvme_mi_req req;
+	int rc = 0;
+	__le16 cpsr = 0xffff;
+
+	nvme_mi_service_init_req(&req, &req_hdr, opcode);
+
+	nvme_mi_calc_req_mic(&req);
+
+	nvme_mi_service_init_resp(&resp, &resp_hdr);
+
+	rc = nvme_mi_submit(ep, &req, &resp);
+	if (rc)
+		return rc;
+
+	rc = nvme_mi_service_parse_status(&resp, &cpsr);
+	if (rc)
+		return rc;
+
+	if (result_cpsr)
+		*result_cpsr = le16_to_cpu(cpsr);
+
+	nvme_msg(ep->root, LOG_DEBUG,
+			 "servie primitive opcode=%#x, crsp is %#x\n", opcode, cpsr);
 
 	return 0;
 }

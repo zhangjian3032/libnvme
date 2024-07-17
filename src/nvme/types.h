@@ -6727,6 +6727,14 @@ enum nvme_admin_opcode {
 	nvme_admin_get_lba_status	= 0x86,
 };
 
+enum nvme_service_opcode {
+	nvme_service_primitive_pause		= 0x00,
+	nvme_service_primitive_resume		= 0x01,
+	nvme_service_primitive_abort		= 0x02,
+	nvme_service_primitive_get_state	= 0x03,
+	nvme_service_primitive_replay		= 0x04,
+};
+
 /**
  * enum nvme_identify_cns -			Identify - CNS Values
  * @NVME_IDENTIFY_CNS_NS:			Identify Namespace data structure
