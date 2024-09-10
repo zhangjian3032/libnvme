@@ -920,12 +920,23 @@ int main(int argc, char **argv)
 	bool dbus = false, usage = true;
 	uint8_t eid;
 	int rc = 0, net;
+	bool use_ifname = false;
+	char *ifname;
+	uint8_t phyaddr;
 
 	if (argc >= 2 && strcmp(argv[1], "dbus") == 0) {
 		usage = false;
 		dbus= true;
 		argv += 1;
 		argc -= 1;
+	} else if (argc >= 4 && strcmp(argv[1], "ifname") == 0) {
+		use_ifname = true;
+		usage = false;
+		ifname = argv[2];
+		net = atoi(argv[3]) & 0xff;
+		phyaddr = strtoul(argv[4], NULL, 0);
+		argv += 4;
+		argc -= 4;
 	} else if (argc >= 3) {
 		usage = false;
 		net = atoi(argv[1]);
@@ -937,6 +948,7 @@ int main(int argc, char **argv)
 	if (usage) {
 		fprintf(stderr,
 			"usage: %s <net> <eid> [action] [action args]\n"
+			"usage: %s ifname <ifname> <net> <phyaddr> [action] [action args]\n"
 			"       %s 'dbus'      [action] [action args]\n",
 			argv[0], argv[0]);
 		fprintf(stderr, "where action is:\n"
@@ -1010,8 +1022,11 @@ int main(int argc, char **argv)
 		root = nvme_mi_create_root(stderr, DEFAULT_LOGLEVEL);
 		if (!root)
 			err(EXIT_FAILURE, "can't create NVMe root");
-
-		ep = nvme_mi_open_mctp(root, net, eid);
+		if (!use_ifname)
+			ep = nvme_mi_open_mctp(root, net, eid);
+		else {
+			ep = nvme_mi_open_mctp_physical(root, net, ifname, &phyaddr, 1);
+		}
 		if (!ep)
 			errx(EXIT_FAILURE, "can't open MCTP endpoint %d:%d", net, eid);
 		rc = do_action_endpoint(action, ep, argc, argv);

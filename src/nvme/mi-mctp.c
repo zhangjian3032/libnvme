@@ -65,6 +65,18 @@ struct sockaddr_mctp {
 	__u8			__smctp_pad1;
 };
 
+struct sockaddr_mctp_ext {
+	struct sockaddr_mctp smctp_base;
+	int			smctp_ifindex;
+	__u8			smctp_halen;
+	__u8			__smctp_pad0[3];
+	__u8		smctp_haddr[32];
+};
+
+#define SOL_MCTP 285
+
+#define MCTP_OPT_ADDR_EXT 1
+
 #define MCTP_NET_ANY		0x0
 
 #define MCTP_ADDR_NULL		0x00
@@ -81,7 +93,13 @@ struct sockaddr_mctp {
 struct nvme_mi_transport_mctp {
 	int	net;
 	__u8	eid;
-	int	sd;
+	bool use_eid;
+
+	int ifindex;
+	unsigned char smctp_haddr[32];
+	__u8 smctp_halen;
+
+	int sd;
 	void	*resp_buf;
 	size_t	resp_buf_size;
 };
@@ -115,6 +133,9 @@ static __u8 nvme_mi_mctp_tag_alloc(struct nvme_mi_ep *ep)
 
 	mctp = ep->transport_data;
 
+	if (!mctp->use_eid)
+		return MCTP_TAG_OWNER;
+
 	ctl.peer_addr = mctp->eid;
 
 	errno = 0;
@@ -139,6 +160,9 @@ static void nvme_mi_mctp_tag_drop(struct nvme_mi_ep *ep, __u8 tag)
 	struct mctp_ioc_tag_ctl ctl = { 0 };
 
 	mctp = ep->transport_data;
+
+	if (!mctp->use_eid)
+		return;
 
 	if (!(tag & MCTP_TAG_PREALLOC))
 		return;
@@ -220,6 +244,42 @@ static bool nvme_mi_mctp_resp_is_mpr(void *buf, size_t len,
 	return true;
 }
 
+static bool nvme_mi_mctp_physical_open(struct nvme_mi_ep *ep)
+{
+	struct nvme_mi_transport_mctp *mctp;
+	int val = 1, ret;
+
+	mctp = ep->transport_data;
+
+	mctp->sd = ops.socket(AF_MCTP, SOCK_DGRAM, 0);
+	if (mctp->sd < 0) {
+		return false;
+	}
+
+	ret = setsockopt(mctp->sd, SOL_MCTP, MCTP_OPT_ADDR_EXT, &val, sizeof(val));
+	if (ret < 0) {
+		close(mctp->sd);
+		mctp->sd = -1;
+		return false;
+	}
+
+	return true;
+}
+
+static void nvme_mi_mctp_physical_close(struct nvme_mi_ep *ep)
+{
+	struct nvme_mi_transport_mctp *mctp;
+
+	if (ep->transport != &nvme_mi_transport_mctp)
+		return;
+
+	mctp = ep->transport_data;
+
+	if (mctp->sd >= 0)
+		close(mctp->sd);
+}
+
+
 static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 			       struct nvme_mi_req *req,
 			       struct nvme_mi_resp *resp)
@@ -229,7 +289,7 @@ static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 	struct iovec req_iov[3], resp_iov[1];
 	struct msghdr req_msg, resp_msg;
 	int i, rc, errno_save, timeout;
-	struct sockaddr_mctp addr;
+	struct sockaddr_mctp_ext addr;
 	struct pollfd pollfds[1];
 	unsigned int mpr_time;
 	__le32 mic;
@@ -247,14 +307,31 @@ static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 	}
 
 	mctp = ep->transport_data;
+
+	if (!mctp->use_eid) {
+		if (!nvme_mi_mctp_physical_open(ep)) {
+			errno_save = errno;
+			nvme_msg(ep->root, LOG_ERR,
+				 "Failed opening MCTP socket: %m\n");
+			errno = errno_save;
+			return -1;
+		}
+	}
+
 	tag = nvme_mi_mctp_tag_alloc(ep);
 
 	memset(&addr, 0, sizeof(addr));
-	addr.smctp_family = AF_MCTP;
-	addr.smctp_network = mctp->net;
-	addr.smctp_addr.s_addr = mctp->eid;
-	addr.smctp_type = MCTP_TYPE_NVME | MCTP_TYPE_MIC;
-	addr.smctp_tag = tag;
+	addr.smctp_base.smctp_family = AF_MCTP;
+	addr.smctp_base.smctp_network = mctp->net;
+	addr.smctp_base.smctp_addr.s_addr = mctp->eid;
+	addr.smctp_base.smctp_type = MCTP_TYPE_NVME | MCTP_TYPE_MIC;
+	addr.smctp_base.smctp_tag = tag;
+
+	if (!mctp->use_eid) {
+		addr.smctp_ifindex = mctp->ifindex;
+		addr.smctp_halen = mctp->smctp_halen;
+		memcpy(addr.smctp_haddr, mctp->smctp_haddr, mctp->smctp_halen);
+	}
 
 	i = 0;
 	req_iov[i].iov_base = ((__u8 *)req->hdr) + 1;
@@ -274,7 +351,7 @@ static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 
 	memset(&req_msg, 0, sizeof(req_msg));
 	req_msg.msg_name = &addr;
-	req_msg.msg_namelen = sizeof(addr);
+	req_msg.msg_namelen = mctp->use_eid ? sizeof(struct sockaddr_mctp) : sizeof(struct sockaddr_mctp_ext);
 	req_msg.msg_iov = req_iov;
 	req_msg.msg_iovlen = i;
 
@@ -421,6 +498,9 @@ retry:
 out:
 	nvme_mi_mctp_tag_drop(ep, tag);
 
+	if (!mctp->use_eid)
+		nvme_mi_mctp_physical_close(ep);
+
 	return rc;
 }
 
@@ -461,7 +541,9 @@ static const struct nvme_mi_transport nvme_mi_transport_mctp = {
 	.desc_ep = nvme_mi_mctp_desc_ep,
 };
 
-nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, __u8 eid)
+static nvme_mi_ep_t nvme_mi_open_mctp_internal(nvme_root_t root, unsigned int netid, bool use_eid, __u8 eid,
+										const char* ifname,  const unsigned char* smctp_haddr,
+										int smctp_halen)
 {
 	struct nvme_mi_transport_mctp *mctp;
 	struct nvme_mi_ep *ep;
@@ -488,12 +570,25 @@ nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, __u8 eid)
 	}
 
 	mctp->net = netid;
+	mctp->use_eid = use_eid;
 	mctp->eid = eid;
 
-	mctp->sd = ops.socket(AF_MCTP, SOCK_DGRAM, 0);
-	if (mctp->sd < 0) {
-		errno_save = errno;
-		goto err_free_rspbuf;
+	if (mctp->use_eid)
+	{
+		mctp->sd = ops.socket(AF_MCTP, SOCK_DGRAM, 0);
+		if (mctp->sd < 0) {
+			errno_save = errno;
+			goto err_free_rspbuf;
+		}
+	} else {
+		mctp->ifindex = if_nametoindex(ifname);
+		if (mctp->ifindex == 0) {
+			errno_save = errno;
+			goto err_free_rspbuf;
+		}
+
+		memcpy(mctp->smctp_haddr, smctp_haddr, smctp_halen);
+		mctp->smctp_halen = smctp_halen;
 	}
 
 	ep->transport = &nvme_mi_transport_mctp;
@@ -520,6 +615,17 @@ err_close_ep:
 	nvme_mi_close(ep);
 	errno = errno_save;
 	return NULL;
+}
+
+nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, __u8 eid)
+{
+	return nvme_mi_open_mctp_internal(root, netid, true, eid, NULL, NULL, 0);
+}
+
+nvme_mi_ep_t nvme_mi_open_mctp_physical(nvme_root_t root, unsigned int netid,
+							const char* ifname, const unsigned char* smctp_haddr, int smctp_halen)
+{
+	return nvme_mi_open_mctp_internal(root, netid, false, 0, ifname, smctp_haddr, smctp_halen);
 }
 
 #ifdef CONFIG_DBUS

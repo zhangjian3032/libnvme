@@ -59,7 +59,7 @@ LIBNVME_MI_1_1 {
 		nvme_mi_scan_mctp;
 		nvme_mi_scan_ep;
 		nvme_mi_service_primitive_control;
-
+		nvme_mi_open_mctp_physical;
 	local:
 		*;
 };
