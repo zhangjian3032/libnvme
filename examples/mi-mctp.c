@@ -918,7 +918,7 @@ int main(int argc, char **argv)
 	nvme_root_t root;
 	nvme_mi_ep_t ep;
 	bool dbus = false, usage = true;
-	uint8_t eid;
+	uint8_t eid = 0;
 	int rc = 0, net;
 	bool use_ifname = false;
 	char *ifname;
@@ -950,7 +950,7 @@ int main(int argc, char **argv)
 			"usage: %s <net> <eid> [action] [action args]\n"
 			"usage: %s ifname <ifname> <net> <phyaddr> [action] [action args]\n"
 			"       %s 'dbus'      [action] [action args]\n",
-			argv[0], argv[0]);
+			argv[0], argv[0], argv[0]);
 		fprintf(stderr, "where action is:\n"
 			"  info\n"
 			"  controllers\n"

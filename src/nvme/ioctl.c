@@ -112,7 +112,7 @@ static void nvme_show_command(struct nvme_passthru_cmd *cmd, int err, struct tim
 	printf("timeout_ms   : %08x\n", cmd->timeout_ms);
 	printf("result       : %08x\n", cmd->result);
 	printf("err          : %d\n", err);
-	printf("latency      : %lu us\n",
+	printf("latency      : %"PRIu64" us\n",
 	       (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec));
 }
 
