@@ -636,6 +636,19 @@ nvme_mi_ctrl_t nvme_mi_next_ctrl(nvme_mi_ep_t ep, nvme_mi_ctrl_t c);
  */
 nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, uint8_t eid);
 
+/*
+ * nvme_mi_setup_pcie_mctp() - Set up the PCIe-MCTP bridge for NVMe-MI
+ * @bdf: BDF of the PCIe device
+ *
+ * This function sets up the PCIe-MCTP bridge for NVMe-MI communication. It
+ * configures the PCIe device to act as a bridge between the PCIe bus and the
+ * MCTP bus, allowing NVMe-MI commands to be sent over PCIe.
+ *
+ * This function is only available if libnvme-mi has been compiled with PCIe
+ * support.
+ */
+void setup_pcie_mctp(uint16_t bdf);
+
 /**
  * nvme_mi_close() - Close an endpoint connection and release resources,
  * including controller objects.

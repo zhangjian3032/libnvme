@@ -23,6 +23,7 @@ mi_sources = [
     'nvme/log.c',
     'nvme/mi.c',
     'nvme/mi-mctp.c',
+    'nvme/mi-mctp-pcie.c',
 ]
 
 if json_c_dep.found()

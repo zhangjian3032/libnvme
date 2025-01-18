@@ -6,6 +6,7 @@ LIBNVME_MI_1_12 {
 LIBNVME_MI_1_11 {
 	global:
 		nvme_mi_control;
+		setup_pcie_mctp;
 };
 
 LIBNVME_MI_1_10 {
