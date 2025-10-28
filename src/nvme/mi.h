@@ -621,6 +621,8 @@ nvme_mi_ctrl_t nvme_mi_next_ctrl(nvme_mi_ep_t ep, nvme_mi_ctrl_t c);
 nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, uint8_t eid);
 nvme_mi_ep_t nvme_mi_open_mctp_physical(nvme_root_t root, unsigned int netid,
 										const char *ifname, const unsigned char *smctp_haddr, int smctp_halen);
+int nvme_mi_mctp_get_debug_data(struct nvme_mi_ep *ep, const __u8 *req, __u8 *req_len,
+				const __u8 *resp, __u8 *resp_len);
 
 /**
  * nvme_mi_close() - Close an endpoint connection and release resources,

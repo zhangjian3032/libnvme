@@ -91,6 +91,16 @@ struct sockaddr_mctp_ext {
 #define MCTP_TYPE_NVME		0x04
 #define MCTP_TYPE_MIC		0x80
 
+struct message_save_debug
+{
+	__u8 req[256];
+	__u8 req_len;
+
+	__u8 resp[256];
+	__u8 resp_len;
+};
+
+
 struct nvme_mi_transport_mctp {
 	int	net;
 	__u8	eid;
@@ -103,6 +113,8 @@ struct nvme_mi_transport_mctp {
 	int sd;
 	void	*resp_buf;
 	size_t	resp_buf_size;
+
+	struct message_save_debug msg_save_debug;
 };
 
 static int ioctl_tag(int sd, unsigned long req, struct mctp_ioc_tag_ctl *ctl)
@@ -280,6 +292,56 @@ static void nvme_mi_mctp_physical_close(struct nvme_mi_ep *ep)
 		close(mctp->sd);
 }
 
+static void nvme_mi_record_req(struct nvme_mi_transport_mctp *mctp, struct iovec *req_iov, int iovcnt)
+{
+	size_t total_len = 0;
+	int i;
+
+	for (i = 0; i < iovcnt; i++) {
+		if (total_len + req_iov[i].iov_len > sizeof(mctp->msg_save_debug.req))
+			break;
+
+		memcpy(mctp->msg_save_debug.req + total_len,
+		       req_iov[i].iov_base,
+		       req_iov[i].iov_len);
+		total_len += req_iov[i].iov_len;
+	}
+
+	mctp->msg_save_debug.req_len = total_len;
+}
+
+static void nvme_mi_record_resp(struct nvme_mi_transport_mctp *mctp, void *resp_buf, size_t resp_len)
+{
+	size_t copy_len = resp_len;
+
+	if (copy_len > sizeof(mctp->msg_save_debug.resp))
+		copy_len = sizeof(mctp->msg_save_debug.resp);
+
+	memcpy(mctp->msg_save_debug.resp,
+	       resp_buf,
+	       copy_len);
+	mctp->msg_save_debug.resp_len = copy_len;
+}
+
+int nvme_mi_mctp_get_debug_data(struct nvme_mi_ep *ep, const __u8 *req, __u8 *req_len,
+				const __u8 *resp, __u8 *resp_len)
+{
+	struct nvme_mi_transport_mctp *mctp;
+
+	if (ep->transport != &nvme_mi_transport_mctp) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	mctp = ep->transport_data;
+
+	memcpy((void *)req, mctp->msg_save_debug.req, mctp->msg_save_debug.req_len);
+	*req_len = mctp->msg_save_debug.req_len;
+	memcpy((void *)resp, mctp->msg_save_debug.resp, mctp->msg_save_debug.resp_len);
+	*resp_len = mctp->msg_save_debug.resp_len;
+
+	return 0;
+}
 
 static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 			       struct nvme_mi_req *req,
@@ -308,6 +370,8 @@ static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 	}
 
 	mctp = ep->transport_data;
+
+	memset(&mctp->msg_save_debug, 0, sizeof(mctp->msg_save_debug));
 
 	if (!mctp->use_eid) {
 		if (!nvme_mi_mctp_physical_open(ep)) {
@@ -355,6 +419,8 @@ static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 	req_msg.msg_namelen = mctp->use_eid ? sizeof(struct sockaddr_mctp) : sizeof(struct sockaddr_mctp_ext);
 	req_msg.msg_iov = req_iov;
 	req_msg.msg_iovlen = i;
+
+	nvme_mi_record_req(mctp, req_iov, i);
 
 	len = ops.sendmsg(mctp->sd, &req_msg, 0);
 	if (len < 0) {
@@ -434,6 +500,7 @@ retry:
 	/* Re-add the type byte, so we can work on aligned lengths from here */
 	((uint8_t *)mctp->resp_buf)[0] = MCTP_TYPE_NVME | MCTP_TYPE_MIC;
 	len += 1;
+	nvme_mi_record_resp(mctp, mctp->resp_buf, len);
 
 	/* The smallest response data is 8 bytes: generic 4-byte message header
 	 * plus four bytes of error data (excluding MIC). Ensure we have enough.
